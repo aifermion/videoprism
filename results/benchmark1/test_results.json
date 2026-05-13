@@ -1,0 +1,51 @@
+{
+  "top1": 0.6487138263665595,
+  "top5": 0.9413183279742765,
+  "mean_class_acc": 0.2979973256587982,
+  "per_class": {
+    "camera_reaction": {
+      "n": 7,
+      "accuracy": 0.14285714285714285
+    },
+    "chasing": {
+      "n": 3,
+      "accuracy": 0.3333333333333333
+    },
+    "courtship": {
+      "n": 56,
+      "accuracy": 0.2857142857142857
+    },
+    "escaping": {
+      "n": 1,
+      "accuracy": 0.0
+    },
+    "foraging": {
+      "n": 688,
+      "accuracy": 0.8125
+    },
+    "grooming": {
+      "n": 24,
+      "accuracy": 0.125
+    },
+    "marking": {
+      "n": 76,
+      "accuracy": 0.5131578947368421
+    },
+    "playing": {
+      "n": 21,
+      "accuracy": 0.0
+    },
+    "resting": {
+      "n": 48,
+      "accuracy": 0.08333333333333333
+    },
+    "unknown": {
+      "n": 92,
+      "accuracy": 0.29347826086956524
+    },
+    "vigilance": {
+      "n": 228,
+      "accuracy": 0.6885964912280702
+    }
+  }
+}

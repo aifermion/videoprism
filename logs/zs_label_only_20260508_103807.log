@@ -1,0 +1,15 @@
+Logging to: logs/zs_label_only_20260508_103807.log
+JAX version:  0.10.0
+JAX platform: gpu
+JAX devices:  7
+
+CSV file:   test-mod-B.csv
+Video dir:  ../mammalps-dataset/benchmark_1/clips
+Videos:     1244
+
+Label sets:
+  Species    (5): ['red_deer', 'hare', 'roe_deer', 'wolf', 'fox']
+  Activities (11): ['foraging', 'courtship', 'camera_reaction', 'unknown', 'vigilance', 'escaping', 'grooming', 'marking', 'resting', 'playing', 'chasing']
+  Actions    (20): ['walking', 'none', 'standing_head_up', 'vocalizing', 'sniffing', 'grazing', 'looking_at_camera', 'unknown', 'standing_head_down', 'defecating', 'running', 'scratching_body', 'scratching_antlers', 'bathing', 'drinking', 'scratching_hoof', 'shaking_fur', 'laying', 'urinating', 'jumping']
+
+Loading model: videoprism_lvt_public_v1_base ...
