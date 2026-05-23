@@ -1,13 +1,12 @@
 """Fine-tune VideoPrism for multi-task classification on MammalPS benchmark_1.
 
-Predicts species, activity, and actions simultaneously using a frozen
-FactorizedEncoder backbone with per-task attention poolers and 2-layer
-MLP classification heads.
+Predicts species, activity, and actions simultaneously using a shared
+FactorizedEncoder backbone (frozen) with three separate classification heads
+(attention-pooler + per-task projection).
 
 Usage:
-    python train_benchmark1.py train   [OPTIONS]  # training + validation
-    python train_benchmark1.py test    [OPTIONS]  # test-set evaluation (single-pass)
-    python train_benchmark1.py test_ms [OPTIONS]  # test-set evaluation (multi-sample)
+    python train_benchmark1.py train [OPTIONS]   # training + validation
+    python train_benchmark1.py test  [OPTIONS]   # test-set evaluation
 
 See --help for all flags.
 """
@@ -15,6 +14,7 @@ See --help for all flags.
 import argparse
 import csv
 import datetime
+import functools
 import glob
 import json
 import math
@@ -32,6 +32,7 @@ import matplotlib.pyplot as plt
 import mediapy
 import numpy as np
 import optax
+import PIL.Image
 import tensorflow as tf
 from flax import linen as nn
 from sklearn.metrics import average_precision_score
@@ -51,7 +52,7 @@ tf.config.set_visible_devices([], "TPU")
 # Constants
 # ---------------------------------------------------------------------------
 NUM_FRAMES = 16
-FRAME_SIZE = 288
+FRAME_SIZE = 180
 
 SPECIES_CLASSES = [
     "fox",
@@ -87,6 +88,7 @@ ACTION_CLASSES = [
     "jumping",
     "laying",
     "looking_at_camera",
+    "none",
     "running",
     "scratching_antlers",
     "scratching_body",
@@ -109,27 +111,19 @@ NUM_ACTIONS = len(ACTION_CLASSES)
 # ===================================================================
 
 class MultiTaskClassifier(vp_layers.Module):
-    """FactorizedEncoder backbone with per-task attention poolers and MLP heads.
-
-    Each task gets its own attention pooler so it can learn to attend to
-    different spatiotemporal cues, followed by a 2-layer MLP
-    (hidden + GELU + dropout + linear projection).
+    """Shared FactorizedEncoder with three classification heads.
 
     Attributes:
         encoder_params: Config dict for FactorizedEncoder.
         num_species: Number of species classes.
         num_activities: Number of activity classes.
         num_actions: Number of action classes (multi-label).
-        dropout_rate: Dropout rate applied inside each MLP head.
-        head_hidden_dim: Hidden-layer width for the 2-layer MLP heads.
     """
 
     encoder_params: dict = None
     num_species: int = 0
     num_activities: int = 0
     num_actions: int = 0
-    dropout_rate: float = 0.0
-    head_hidden_dim: int = 256
 
     @nn.compact
     def __call__(self, inputs, train=False):
@@ -140,43 +134,39 @@ class MultiTaskClassifier(vp_layers.Module):
             **self.encoder_params,
         )(inputs, train=train, return_intermediate=False)
 
-        num_heads = self.encoder_params["num_heads"]
-        model_dim = self.encoder_params["model_dim"]
-        det = not train
+        embeddings = vp_layers.AttenTokenPoolingLayer(
+            name="atten_pooler",
+            num_heads=self.encoder_params["num_heads"],
+            hidden_dim=self.encoder_params["model_dim"],
+            num_queries=1,
+            dtype=self.dtype,
+            fprop_dtype=self.fprop_dtype,
+        )(features, paddings=None, train=train)
+        embeddings = jnp.squeeze(embeddings, axis=-2)
 
-        def _task_head(name, num_classes):
-            emb = vp_layers.AttenTokenPoolingLayer(
-                name=f"{name}_pooler",
-                num_heads=num_heads,
-                hidden_dim=model_dim,
-                num_queries=1,
-                dtype=self.dtype,
-                fprop_dtype=self.fprop_dtype,
-            )(features, paddings=None, train=train)
-            emb = jnp.squeeze(emb, axis=-2)
-            h = vp_layers.FeedForward(
-                name=f"{name}_hidden",
-                output_dim=self.head_hidden_dim,
-                activation_fn=jax.nn.gelu,
-                dtype=self.dtype,
-                fprop_dtype=self.fprop_dtype,
-            )(emb)
-            if self.dropout_rate > 0.0:
-                h = nn.Dropout(
-                    rate=self.dropout_rate, deterministic=det,
-                    name=f"{name}_dropout",
-                )(h)
-            return vp_layers.FeedForward(
-                name=f"{name}_out",
-                output_dim=num_classes,
-                activation_fn=vp_layers.identity,
-                dtype=self.dtype,
-                fprop_dtype=self.fprop_dtype,
-            )(h)
+        species_logits = vp_layers.FeedForward(
+            name="species_head",
+            output_dim=self.num_species,
+            activation_fn=vp_layers.identity,
+            dtype=self.dtype,
+            fprop_dtype=self.fprop_dtype,
+        )(embeddings)
 
-        species_logits = _task_head("species", self.num_species)
-        activity_logits = _task_head("activity", self.num_activities)
-        action_logits = _task_head("actions", self.num_actions)
+        activity_logits = vp_layers.FeedForward(
+            name="activity_head",
+            output_dim=self.num_activities,
+            activation_fn=vp_layers.identity,
+            dtype=self.dtype,
+            fprop_dtype=self.fprop_dtype,
+        )(embeddings)
+
+        action_logits = vp_layers.FeedForward(
+            name="action_head",
+            output_dim=self.num_actions,
+            activation_fn=vp_layers.identity,
+            dtype=self.dtype,
+            fprop_dtype=self.fprop_dtype,
+        )(embeddings)
 
         return species_logits, activity_logits, action_logits
 
@@ -224,57 +214,25 @@ def read_and_preprocess_frames(
     source: str,
     target_num_frames: int = NUM_FRAMES,
     target_frame_size: tuple[int, int] = (FRAME_SIZE, FRAME_SIZE),
-    augment: bool = False,
 ) -> np.ndarray:
-    """Load an MP4 clip and return float32 [T, H, W, 3] in [0, 1].
-
-    When *augment* is True (training), applies temporal jitter, random crop,
-    random horizontal flip, and brightness/contrast jitter.  When False
-    (evaluation), uses uniform temporal sampling and center crop.
-    """
+    """Load an MP4 clip and return float32 [T, H, W, 3] in [0, 1]."""
     frames = mediapy.read_video(source)
     n = len(frames)
     if n == 0:
         raise ValueError(f"Empty video: {source}")
-
-    indices = np.linspace(0, n, num=target_num_frames, endpoint=False, dtype=np.float64)
-    if augment and n > target_num_frames:
-        stride = n / target_num_frames
-        jitter = np.random.uniform(-0.4 * stride, 0.4 * stride, size=target_num_frames)
-        indices = np.clip(indices + jitter, 0, n - 1)
-    indices = indices.astype(np.int32)
+    indices = np.linspace(0, n, num=target_num_frames, endpoint=False, dtype=np.int32)
     frames = np.asarray([frames[i] for i in indices])
 
     h, w = frames.shape[1], frames.shape[2]
     target_h, target_w = target_frame_size
-
-    if augment:
-        scale = max(target_h / h, target_w / w) * np.random.uniform(1.0, 1.25)
-    else:
-        scale = max(target_h / h, target_w / w)
-
+    scale = max(target_h / h, target_w / w)
     new_h, new_w = int(round(h * scale)), int(round(w * scale))
     if (new_h, new_w) != (h, w):
         frames = mediapy.resize_video(frames, shape=(new_h, new_w))
-
-    if augment:
-        top = np.random.randint(0, max(new_h - target_h, 0) + 1)
-        left = np.random.randint(0, max(new_w - target_w, 0) + 1)
-    else:
-        top = (new_h - target_h) // 2
-        left = (new_w - target_w) // 2
+    top = (new_h - target_h) // 2
+    left = (new_w - target_w) // 2
     frames = frames[:, top : top + target_h, left : left + target_w]
-
-    frames = mediapy.to_float01(frames)
-
-    if augment:
-        if np.random.random() < 0.5:
-            frames = frames[:, :, ::-1, :].copy()
-        brightness = np.random.uniform(-0.1, 0.1)
-        contrast = np.random.uniform(0.9, 1.1)
-        frames = np.clip(contrast * frames + brightness, 0.0, 1.0).astype(np.float32)
-
-    return frames
+    return mediapy.to_float01(frames)
 
 
 def random_sample_and_preprocess(
@@ -347,7 +305,6 @@ def make_batches(
     shuffle: bool = False,
     drop_remainder: bool = False,
     sample_weights: np.ndarray | None = None,
-    augment: bool = False,
 ):
     """Yield (videos, species, activity, actions) batches with parallel I/O.
 
@@ -371,7 +328,7 @@ def make_batches(
 
     def _load(item):
         path, sp, act, action_vec = item
-        return read_and_preprocess_frames(path, augment=augment), sp, act, action_vec
+        return read_and_preprocess_frames(path), sp, act, action_vec
 
     buf_videos, buf_species, buf_activity, buf_actions = [], [], [], []
     chunk_size = num_workers * 2
@@ -404,9 +361,7 @@ def make_batches(
 # Model / optimizer
 # ===================================================================
 
-def build_model_and_params(
-    model_size: str = "base", dropout_rate: float = 0.0, head_hidden_dim: int = 256
-):
+def build_model_and_params(model_size: str = "base"):
     """Create MultiTaskClassifier and inject pretrained encoder weights."""
     encoder_config = {
         "base": vp.CONFIGS["videoprism_v1_base"],
@@ -422,8 +377,6 @@ def build_model_and_params(
         num_species=NUM_SPECIES,
         num_activities=NUM_ACTIVITIES,
         num_actions=NUM_ACTIONS,
-        dropout_rate=dropout_rate,
-        head_hidden_dim=head_hidden_dim,
     )
     key = jax.random.PRNGKey(0)
     dummy = jnp.zeros((1, NUM_FRAMES, FRAME_SIZE, FRAME_SIZE, 3))
@@ -435,19 +388,8 @@ def build_model_and_params(
     return classifier, params
 
 
-def build_optimizer(
-    params: dict,
-    learning_rate: float = 1e-5,
-    min_learning_rate: float = 1e-7,
-    total_steps: int = 1000,
-    weight_decay: float = 0.01,
-):
-    """Partitioned optimizer: encoder frozen, heads use AdamW + cosine decay."""
-    schedule = optax.cosine_decay_schedule(
-        init_value=learning_rate,
-        decay_steps=total_steps,
-        alpha=min_learning_rate / learning_rate,
-    )
+def build_optimizer(params: dict, learning_rate: float = 1e-4):
+    """Partitioned optimizer: encoder frozen, all heads use Adam."""
 
     def _tag(subtree, label):
         return jax.tree.map(lambda _: label, subtree)
@@ -458,17 +400,15 @@ def build_optimizer(
     }
     tx = optax.multi_transform(
         {
-            "trainable": optax.adamw(
-                learning_rate=schedule, weight_decay=weight_decay
-            ),
+            "trainable": optax.adam(learning_rate=learning_rate),
             "frozen": optax.set_to_zero(),
         },
         param_labels,
     )
     opt_state = tx.init(params)
     print(
-        f"Optimizer ready — AdamW (lr={learning_rate}→{min_learning_rate} cosine, "
-        f"wd={weight_decay}, {total_steps} steps) | encoder: frozen"
+        "Optimizer ready — encoder: frozen | atten_pooler + "
+        "species/activity/action heads: trainable"
     )
     return tx, opt_state
 
@@ -477,18 +417,16 @@ def build_optimizer(
 # Train / eval steps
 # ===================================================================
 
-def make_train_step(classifier, tx, loss_weights=(1.0, 1.0, 1.0)):
+def make_train_step(classifier, tx):
     """JIT-compiled multi-task training step."""
-    w_sp, w_act, w_action = loss_weights
 
     @jax.jit
     def train_step(
-        params, opt_state, batch_videos, batch_species, batch_activity, batch_actions, rng
+        params, opt_state, batch_videos, batch_species, batch_activity, batch_actions
     ):
         def loss_fn(p):
             sp_logits, act_logits, action_logits = classifier.apply(
-                {"params": p}, batch_videos, train=True,
-                rngs={"dropout": rng},
+                {"params": p}, batch_videos, train=True
             )
             sp_loss = optax.softmax_cross_entropy_with_integer_labels(
                 sp_logits, batch_species
@@ -499,7 +437,7 @@ def make_train_step(classifier, tx, loss_weights=(1.0, 1.0, 1.0)):
             action_loss = optax.sigmoid_binary_cross_entropy(
                 action_logits, batch_actions
             ).mean()
-            total_loss = w_sp * sp_loss + w_act * act_loss + w_action * action_loss
+            total_loss = sp_loss + act_loss + action_loss
             return total_loss, (sp_logits, act_logits, action_logits, sp_loss, act_loss, action_loss)
 
         (loss, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
@@ -564,7 +502,7 @@ def compute_map_metrics(
     from_probs: bool = False,
     pred_threshold: float | None = None,
 ) -> dict:
-    """Compute mAP, mAP Rank-1, mAP Rank-5, and Macro F1 per class and overall.
+    """Compute mAP, mAP Rank-1, mAP Rank-5, Macro mAP, and Macro F1 per class and overall.
 
     For single-label tasks the labels (int indices) are expanded to one-vs-rest
     binary vectors and softmax probabilities are used as scores.
@@ -650,13 +588,14 @@ def compute_map_metrics(
         "mAP": mean_ap,
         "mAP_rank1": mean_ap_rank1,
         "mAP_rank5": mean_ap_rank5,
+        "macro_mAP": mean_ap,
         "macro_f1": macro_f1,
         "per_class": per_class,
     }
 
 
 def evaluate(eval_step_fn, params, batches, n_batches: int) -> dict:
-    """Full evaluation pass returning mAP, mAP Rank-1, mAP Rank-5, and Macro F1 per task."""
+    """Full evaluation pass returning mAP, mAP Rank-1, mAP Rank-5, Macro mAP, and Macro F1 per task."""
     all_sp, all_act, all_action = [], [], []
     all_sp_labels, all_act_labels, all_action_labels = [], [], []
 
@@ -687,6 +626,7 @@ def evaluate(eval_step_fn, params, batches, n_batches: int) -> dict:
     print(f"    mAP        : {sp_metrics['mAP'] * 100:.2f}%")
     print(f"    mAP Rank-1 : {sp_metrics['mAP_rank1'] * 100:.2f}%")
     print(f"    mAP Rank-5 : {sp_metrics['mAP_rank5'] * 100:.2f}%")
+    print(f"    Macro mAP  : {sp_metrics['macro_mAP'] * 100:.2f}%")
     print(f"    Macro F1   : {sp_metrics['macro_f1'] * 100:.2f}%")
     for name, info in sp_metrics["per_class"].items():
         print(
@@ -701,6 +641,7 @@ def evaluate(eval_step_fn, params, batches, n_batches: int) -> dict:
     print(f"    mAP        : {act_metrics['mAP'] * 100:.2f}%")
     print(f"    mAP Rank-1 : {act_metrics['mAP_rank1'] * 100:.2f}%")
     print(f"    mAP Rank-5 : {act_metrics['mAP_rank5'] * 100:.2f}%")
+    print(f"    Macro mAP  : {act_metrics['macro_mAP'] * 100:.2f}%")
     print(f"    Macro F1   : {act_metrics['macro_f1'] * 100:.2f}%")
     for name, info in act_metrics["per_class"].items():
         print(
@@ -715,6 +656,7 @@ def evaluate(eval_step_fn, params, batches, n_batches: int) -> dict:
     print(f"    mAP        : {action_metrics['mAP'] * 100:.2f}%")
     print(f"    mAP Rank-1 : {action_metrics['mAP_rank1'] * 100:.2f}%")
     print(f"    mAP Rank-5 : {action_metrics['mAP_rank5'] * 100:.2f}%")
+    print(f"    Macro mAP  : {action_metrics['macro_mAP'] * 100:.2f}%")
     print(f"    Macro F1   : {action_metrics['macro_f1'] * 100:.2f}%")
     for name, info in action_metrics["per_class"].items():
         print(
@@ -821,6 +763,7 @@ def evaluate_multi_sample(
     print(f"    mAP        : {sp_metrics['mAP'] * 100:.2f}%")
     print(f"    mAP Rank-1 : {sp_metrics['mAP_rank1'] * 100:.2f}%")
     print(f"    mAP Rank-5 : {sp_metrics['mAP_rank5'] * 100:.2f}%")
+    print(f"    Macro mAP  : {sp_metrics['macro_mAP'] * 100:.2f}%")
     print(f"    Macro F1   : {sp_metrics['macro_f1'] * 100:.2f}%")
     for name, info in sp_metrics["per_class"].items():
         print(
@@ -835,6 +778,7 @@ def evaluate_multi_sample(
     print(f"    mAP        : {act_metrics['mAP'] * 100:.2f}%")
     print(f"    mAP Rank-1 : {act_metrics['mAP_rank1'] * 100:.2f}%")
     print(f"    mAP Rank-5 : {act_metrics['mAP_rank5'] * 100:.2f}%")
+    print(f"    Macro mAP  : {act_metrics['macro_mAP'] * 100:.2f}%")
     print(f"    Macro F1   : {act_metrics['macro_f1'] * 100:.2f}%")
     for name, info in act_metrics["per_class"].items():
         print(
@@ -849,6 +793,7 @@ def evaluate_multi_sample(
     print(f"    mAP        : {action_metrics['mAP'] * 100:.2f}%")
     print(f"    mAP Rank-1 : {action_metrics['mAP_rank1'] * 100:.2f}%")
     print(f"    mAP Rank-5 : {action_metrics['mAP_rank5'] * 100:.2f}%")
+    print(f"    Macro mAP  : {action_metrics['macro_mAP'] * 100:.2f}%")
     print(f"    Macro F1   : {action_metrics['macro_f1'] * 100:.2f}%")
     for name, info in action_metrics["per_class"].items():
         print(
@@ -931,11 +876,7 @@ def train(
 
     print(f"Run ID: {run_id}  |  Checkpoints → {run_ckpt_dir}")
 
-    rng = jax.random.PRNGKey(args.seed + 1)
-    train_step_fn = make_train_step(
-        classifier, tx,
-        loss_weights=(args.loss_weight_species, args.loss_weight_activity, args.loss_weight_actions),
-    )
+    train_step_fn = make_train_step(classifier, tx)
     eval_step_fn = make_eval_step(classifier)
     history = {
         "loss": [],
@@ -951,6 +892,7 @@ def train(
 
     best_val_metric = -1.0
     best_ckpt_path: str | None = None
+    last_ckpt_path: str | None = None
 
     n_train_batches = math.ceil(len(train_samples) / args.batch_size)
     n_val_batches = math.ceil(len(val_samples) / args.batch_size) if val_samples else 0
@@ -965,17 +907,9 @@ def train(
             batch_size=args.batch_size,
             num_workers=args.num_workers,
             sample_weights=train_weights,
-            augment=True,
         )
 
-        acc_loss = 0.0
-        acc_sp_loss = 0.0
-        acc_act_loss = 0.0
-        acc_action_loss = 0.0
-        acc_sp_acc = 0.0
-        acc_act_acc = 0.0
-        n_steps = 0
-
+        epoch_metrics = None
         batch_bar = tqdm(
             train_batches,
             total=n_train_batches,
@@ -984,63 +918,43 @@ def train(
             leave=False,
         )
         for batch_videos, batch_species, batch_activity, batch_actions in batch_bar:
-            rng, step_rng = jax.random.split(rng)
-            params, opt_state, step_metrics = train_step_fn(
+            params, opt_state, epoch_metrics = train_step_fn(
                 params,
                 opt_state,
                 jnp.asarray(batch_videos),
                 jnp.asarray(batch_species),
                 jnp.asarray(batch_activity),
                 jnp.asarray(batch_actions),
-                step_rng,
             )
             global_step += 1
-            n_steps += 1
-
-            s_loss = float(step_metrics["loss"])
-            acc_loss += s_loss
-            acc_sp_loss += float(step_metrics["sp_loss"])
-            acc_act_loss += float(step_metrics["act_loss"])
-            acc_action_loss += float(step_metrics["action_loss"])
-            acc_sp_acc += float(step_metrics["sp_acc"])
-            acc_act_acc += float(step_metrics["act_acc"])
-
             batch_bar.set_postfix(
-                loss=f"{s_loss:.4f}",
-                sp=f"{float(step_metrics['sp_acc']):.3f}",
-                act=f"{float(step_metrics['act_acc']):.3f}",
+                loss=f"{float(epoch_metrics['loss']):.4f}",
+                sp=f"{float(epoch_metrics['sp_acc']):.3f}",
+                act=f"{float(epoch_metrics['act_acc']):.3f}",
             )
 
             if global_step % args.ckpt_every == 0:
-                periodic_ckpt = save_checkpoint(
+                last_ckpt_path = save_checkpoint(
                     run_ckpt_dir, params, opt_state, epoch, global_step
                 )
-                recent_ckpts.append(periodic_ckpt)
+                recent_ckpts.append(last_ckpt_path)
                 if len(recent_ckpts) > args.keep_recent:
                     evicted = recent_ckpts.pop(0)
                     if evicted != best_ckpt_path:
                         os.remove(evicted)
 
-        if n_steps == 0:
-            continue
-
-        avg_loss = acc_loss / n_steps
-        avg_sp_loss = acc_sp_loss / n_steps
-        avg_act_loss = acc_act_loss / n_steps
-        avg_action_loss = acc_action_loss / n_steps
-        avg_sp_acc = acc_sp_acc / n_steps
-        avg_act_acc = acc_act_acc / n_steps
-        history["loss"].append(avg_loss)
-        history["sp_loss"].append(avg_sp_loss)
-        history["act_loss"].append(avg_act_loss)
-        history["action_loss"].append(avg_action_loss)
-        history["sp_acc"].append(avg_sp_acc)
-        history["act_acc"].append(avg_act_acc)
+        if epoch_metrics is not None:
+            history["loss"].append(float(epoch_metrics["loss"]))
+            history["sp_loss"].append(float(epoch_metrics["sp_loss"]))
+            history["act_loss"].append(float(epoch_metrics["act_loss"]))
+            history["action_loss"].append(float(epoch_metrics["action_loss"]))
+            history["sp_acc"].append(float(epoch_metrics["sp_acc"]))
+            history["act_acc"].append(float(epoch_metrics["act_acc"]))
 
         log = (
-            f"  loss={avg_loss:.4f}  "
-            f"sp_acc={avg_sp_acc:.4f}  "
-            f"act_acc={avg_act_acc:.4f}"
+            f"  loss={float(epoch_metrics['loss']):.4f}  "
+            f"sp_acc={float(epoch_metrics['sp_acc']):.4f}  "
+            f"act_acc={float(epoch_metrics['act_acc']):.4f}"
         )
 
         if val_samples:
@@ -1064,16 +978,9 @@ def train(
             )
 
             composite = (val_sp_map + val_act_map + val_action_map) / 3.0
-            if composite > best_val_metric:
+            if composite > best_val_metric and last_ckpt_path is not None:
                 best_val_metric = composite
-                best_ckpt_path = save_checkpoint(
-                    run_ckpt_dir, params, opt_state, epoch, global_step
-                )
-                recent_ckpts.append(best_ckpt_path)
-                if len(recent_ckpts) > args.keep_recent:
-                    evicted = recent_ckpts.pop(0)
-                    if evicted != best_ckpt_path:
-                        os.remove(evicted)
+                best_ckpt_path = last_ckpt_path
                 print(f"  ★ New best checkpoint (composite={best_val_metric:.4f}): {best_ckpt_path}")
 
         print(log)
@@ -1081,6 +988,8 @@ def train(
         history_path = os.path.join(args.output_dir, "training_history.json")
         with open(history_path, "w") as f:
             json.dump(history, f, indent=2)
+
+    save_checkpoint(run_ckpt_dir, params, opt_state, args.num_epochs, global_step)
     print(f"\nTraining complete. Best composite val metric={best_val_metric:.4f}")
     if best_ckpt_path:
         print(f"Best checkpoint: {best_ckpt_path}")
@@ -1237,25 +1146,12 @@ def run_train(args):
     print(f"  {len(val_samples)} val clips")
     print()
 
-    n_train_batches = math.ceil(len(train_samples) / args.batch_size)
-    total_steps = args.num_epochs * n_train_batches
-
     print(
         f"Building VideoPrism {args.model_size} multi-task classifier "
         f"({NUM_SPECIES} species, {NUM_ACTIVITIES} activities, {NUM_ACTIONS} actions) ..."
     )
-    classifier, params = build_model_and_params(
-        model_size=args.model_size,
-        dropout_rate=args.dropout,
-        head_hidden_dim=args.head_hidden_dim,
-    )
-    tx, opt_state = build_optimizer(
-        params,
-        learning_rate=args.learning_rate,
-        min_learning_rate=args.min_learning_rate,
-        total_steps=total_steps,
-        weight_decay=args.weight_decay,
-    )
+    classifier, params = build_model_and_params(model_size=args.model_size)
+    tx, opt_state = build_optimizer(params, learning_rate=args.learning_rate)
     print()
 
     print("Starting training ...")
@@ -1296,10 +1192,7 @@ def run_test(args):
         f"Building VideoPrism {args.model_size} multi-task classifier "
         f"({NUM_SPECIES} species, {NUM_ACTIVITIES} activities, {NUM_ACTIONS} actions) ..."
     )
-    classifier, params = build_model_and_params(
-        model_size=args.model_size,
-        head_hidden_dim=args.head_hidden_dim,
-    )
+    classifier, params = build_model_and_params(model_size=args.model_size)
 
     ckpt_path = resolve_checkpoint(args)
     print(f"Loading checkpoint: {ckpt_path}")
@@ -1308,71 +1201,7 @@ def run_test(args):
     print()
 
     print("=" * 60)
-    print("Test set evaluation")
-    print("=" * 60)
-
-    eval_step_fn = make_eval_step(classifier)
-    n_test_batches = math.ceil(len(test_samples) / args.batch_size)
-    test_batches = make_batches(
-        test_samples,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        shuffle=False,
-    )
-    test_metrics = evaluate(eval_step_fn, params, test_batches, n_test_batches)
-
-    plot_per_class_accuracy(
-        test_metrics, os.path.join(args.output_dir, "per_class_breakdown.png")
-    )
-
-    results_path = os.path.join(args.output_dir, "test_results.json")
-    with open(results_path, "w") as f:
-        json.dump(test_metrics, f, indent=2)
-    print(f"\nResults saved to {results_path}")
-
-
-# ===================================================================
-# CLI: test_ms subcommand (multi-sample evaluation)
-# ===================================================================
-
-def run_test_multisample(args):
-    """Multi-sample test-set evaluation.
-
-    Each clip is evaluated *num_test_samples* times with randomly sampled
-    frames, and the per-sample probability vectors are averaged before
-    computing metrics.  Clips shorter than *min_clip_duration* are skipped.
-    """
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    video_dir = os.path.join(args.data_dir, "clips")
-    test_csv = args.test_csv or os.path.join(args.data_dir, "metadata", "test.csv")
-
-    print_env_info()
-
-    print("Loading test samples ...")
-    test_samples = load_csv_samples(test_csv, video_dir)
-    print(f"  {len(test_samples)} test clips")
-    print()
-
-    print(
-        f"Building VideoPrism {args.model_size} multi-task classifier "
-        f"({NUM_SPECIES} species, {NUM_ACTIVITIES} activities, {NUM_ACTIONS} actions) ..."
-    )
-    classifier, params = build_model_and_params(
-        model_size=args.model_size,
-        head_hidden_dim=args.head_hidden_dim,
-    )
-
-    ckpt_path = resolve_checkpoint(args)
-    print(f"Loading checkpoint: {ckpt_path}")
-    state = load_checkpoint(ckpt_path)
-    params = state["params"]
-    print()
-
-    print("=" * 60)
-    print(f"Multi-sample test evaluation  (samples={args.num_test_samples}, "
+    print(f"Test set evaluation  (multi-sample={args.num_test_samples}, "
           f"min_duration={args.min_clip_duration}s)")
     print("=" * 60)
 
@@ -1386,10 +1215,10 @@ def run_test_multisample(args):
     )
 
     plot_per_class_accuracy(
-        test_metrics, os.path.join(args.output_dir, "per_class_breakdown_ms.png")
+        test_metrics, os.path.join(args.output_dir, "per_class_breakdown.png")
     )
 
-    results_path = os.path.join(args.output_dir, "test_results_multisample.json")
+    results_path = os.path.join(args.output_dir, "test_results.json")
     with open(results_path, "w") as f:
         json.dump(test_metrics, f, indent=2)
     print(f"\nResults saved to {results_path}")
@@ -1405,8 +1234,6 @@ def _add_common_args(p: argparse.ArgumentParser):
                     help="Root of benchmark_1 dataset")
     p.add_argument("--model_size", type=str, default="base", choices=["base", "large"],
                     help="VideoPrism backbone size")
-    p.add_argument("--head_hidden_dim", type=int, default=256,
-                    help="Hidden dimension for the 2-layer MLP classification heads")
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--num_workers", type=int, default=4,
                     help="Parallel video loading threads")
@@ -1428,20 +1255,8 @@ def parse_args():
                          help="Path to train CSV (default: <data_dir>/metadata/train.csv)")
     p_train.add_argument("--val_csv", type=str, default=None,
                          help="Path to val CSV (default: <data_dir>/metadata/val.csv)")
-    p_train.add_argument("--num_epochs", type=int, default=150)
-    p_train.add_argument("--learning_rate", type=float, default=1e-5)
-    p_train.add_argument("--min_learning_rate", type=float, default=1e-7,
-                         help="Final LR for cosine decay schedule")
-    p_train.add_argument("--weight_decay", type=float, default=0.01,
-                         help="AdamW weight decay")
-    p_train.add_argument("--dropout", type=float, default=0.1,
-                         help="Dropout rate inside MLP heads")
-    p_train.add_argument("--loss_weight_species", type=float, default=1.0,
-                         help="Weight for species classification loss")
-    p_train.add_argument("--loss_weight_activity", type=float, default=1.0,
-                         help="Weight for activity classification loss")
-    p_train.add_argument("--loss_weight_actions", type=float, default=1.0,
-                         help="Weight for multi-label action loss")
+    p_train.add_argument("--num_epochs", type=int, default=30)
+    p_train.add_argument("--learning_rate", type=float, default=1e-4)
     p_train.add_argument("--ckpt_dir", type=str, default="checkpoints/benchmark1_finetune")
     p_train.add_argument("--ckpt_every", type=int, default=50,
                          help="Save checkpoint every N steps")
@@ -1459,23 +1274,10 @@ def parse_args():
                         help="Path to a specific checkpoint .pkl file")
     p_test.add_argument("--ckpt_dir", type=str, default=None,
                         help="Checkpoint directory (uses latest checkpoint found)")
-
-    # ---- test_ms  (multi-sample evaluation) ----
-    p_test_ms = sub.add_parser(
-        "test_ms",
-        help="Multi-sample test evaluation (random frame sampling, probability averaging)",
-    )
-    _add_common_args(p_test_ms)
-    p_test_ms.add_argument("--test_csv", type=str, default=None,
-                           help="Path to test CSV (default: <data_dir>/metadata/test.csv)")
-    p_test_ms.add_argument("--eval_ckpt", type=str, default=None,
-                           help="Path to a specific checkpoint .pkl file")
-    p_test_ms.add_argument("--ckpt_dir", type=str, default=None,
-                           help="Checkpoint directory (uses latest checkpoint found)")
-    p_test_ms.add_argument("--num_test_samples", type=int, default=10,
-                           help="Number of random frame samples per clip")
-    p_test_ms.add_argument("--min_clip_duration", type=float, default=0.5,
-                           help="Skip clips shorter than this duration (seconds)")
+    p_test.add_argument("--num_test_samples", type=int, default=10,
+                        help="Number of random frame samples per clip for multi-sample eval")
+    p_test.add_argument("--min_clip_duration", type=float, default=0.5,
+                        help="Skip clips shorter than this duration (seconds)")
 
     return p.parse_args()
 
@@ -1486,8 +1288,6 @@ def main():
         run_train(args)
     elif args.command == "test":
         run_test(args)
-    elif args.command == "test_ms":
-        run_test_multisample(args)
 
 
 if __name__ == "__main__":
