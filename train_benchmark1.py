@@ -150,6 +150,7 @@ class MultiTaskClassifier(vp_layers.Module):
                 num_heads=num_heads,
                 hidden_dim=model_dim,
                 num_queries=1,
+                internal_enable_per_dim_scale=False,
                 dtype=self.dtype,
                 fprop_dtype=self.fprop_dtype,
             )(features, paddings=None, train=train)

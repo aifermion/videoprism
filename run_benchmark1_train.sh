@@ -46,6 +46,8 @@ for SEED in "${SEEDS[@]}"; do
         --dropout 0.1 \
         --head_hidden_dim 256 \
         --loss_weight_actions 2.0 \
+        --loss_weight_species 1.0 \
+        --loss_weight_activity 2.5 \
         --num_workers 4 \
         --ckpt_dir "checkpoints/benchmark1_RERUN_finetune_seed_${SEED}" \
         --ckpt_every 50 \
