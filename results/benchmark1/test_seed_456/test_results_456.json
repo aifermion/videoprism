@@ -1,0 +1,266 @@
+{
+  "species": {
+    "top1": 0.9782958199356914,
+    "top5": 1.0,
+    "mean_class_acc": 0.2756115794181824,
+    "per_class": {
+      "fox": {
+        "n": 7,
+        "accuracy": 0.0
+      },
+      "hare": {
+        "n": 1,
+        "accuracy": 0.0
+      },
+      "red_deer": {
+        "n": 1220,
+        "accuracy": 0.9934425950050354
+      },
+      "roe_deer": {
+        "n": 13,
+        "accuracy": 0.38461539149284363
+      },
+      "wolf": {
+        "n": 3,
+        "accuracy": 0.0
+      }
+    }
+  },
+  "activity": {
+    "top1": 0.6390675241157556,
+    "top5": 0.9581993569131833,
+    "mean_class_acc": 0.30348387360572815,
+    "per_class": {
+      "camera_reaction": {
+        "n": 7,
+        "accuracy": 0.0
+      },
+      "chasing": {
+        "n": 3,
+        "accuracy": 0.3333333432674408
+      },
+      "courtship": {
+        "n": 56,
+        "accuracy": 0.3928571343421936
+      },
+      "escaping": {
+        "n": 1,
+        "accuracy": 0.0
+      },
+      "foraging": {
+        "n": 688,
+        "accuracy": 0.7659883499145508
+      },
+      "grooming": {
+        "n": 24,
+        "accuracy": 0.1666666716337204
+      },
+      "marking": {
+        "n": 76,
+        "accuracy": 0.4868420958518982
+      },
+      "playing": {
+        "n": 21,
+        "accuracy": 0.095238097012043
+      },
+      "resting": {
+        "n": 48,
+        "accuracy": 0.0625
+      },
+      "unknown": {
+        "n": 92,
+        "accuracy": 0.27173912525177
+      },
+      "vigilance": {
+        "n": 228,
+        "accuracy": 0.7631579041481018
+      }
+    }
+  },
+  "actions": {
+    "mean_ap": 0.391297841278592,
+    "sample_f1": 0.7857984994640943,
+    "per_class": {
+      "bathing": {
+        "n_positive": 2,
+        "n_total": 1244,
+        "accuracy": 0.997588424437299,
+        "precision": 0.3333333333333333,
+        "recall": 0.5,
+        "f1": 0.4,
+        "ap": 0.5
+      },
+      "defecating": {
+        "n_positive": 6,
+        "n_total": 1244,
+        "accuracy": 0.9951768488745981,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "ap": 0.009764194464833634
+      },
+      "drinking": {
+        "n_positive": 6,
+        "n_total": 1244,
+        "accuracy": 0.9951768488745981,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "ap": 0.09693362193362193
+      },
+      "grazing": {
+        "n_positive": 184,
+        "n_total": 1244,
+        "accuracy": 0.9147909967845659,
+        "precision": 0.7267441860465116,
+        "recall": 0.6793478260869565,
+        "f1": 0.702247191011236,
+        "ap": 0.7644726548318215
+      },
+      "jumping": {
+        "n_positive": 7,
+        "n_total": 1244,
+        "accuracy": 0.9943729903536977,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "ap": 0.11561344445889568
+      },
+      "laying": {
+        "n_positive": 53,
+        "n_total": 1244,
+        "accuracy": 0.957395498392283,
+        "precision": 0.5,
+        "recall": 0.018867924528301886,
+        "f1": 0.03636363636363636,
+        "ap": 0.31880642613535204
+      },
+      "looking_at_camera": {
+        "n_positive": 2,
+        "n_total": 1244,
+        "accuracy": 0.9983922829581994,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "ap": 0.29545454545454547
+      },
+      "none": {
+        "n_positive": 1196,
+        "n_total": 1244,
+        "accuracy": 0.9742765273311897,
+        "precision": 0.9762684124386252,
+        "recall": 0.9974916387959866,
+        "f1": 0.9867659222497932,
+        "ap": 0.9877207485540427
+      },
+      "running": {
+        "n_positive": 36,
+        "n_total": 1244,
+        "accuracy": 0.9758842443729904,
+        "precision": 0.6071428571428571,
+        "recall": 0.4722222222222222,
+        "f1": 0.53125,
+        "ap": 0.5765375382320922
+      },
+      "scratching_antlers": {
+        "n_positive": 55,
+        "n_total": 1244,
+        "accuracy": 0.9581993569131833,
+        "precision": 0.8,
+        "recall": 0.07272727272727272,
+        "f1": 0.13333333333333333,
+        "ap": 0.38109902026072834
+      },
+      "scratching_body": {
+        "n_positive": 10,
+        "n_total": 1244,
+        "accuracy": 0.9855305466237942,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "ap": 0.0518961526818397
+      },
+      "scratching_hoof": {
+        "n_positive": 24,
+        "n_total": 1244,
+        "accuracy": 0.9790996784565916,
+        "precision": 0.25,
+        "recall": 0.041666666666666664,
+        "f1": 0.07142857142857142,
+        "ap": 0.1667415743358374
+      },
+      "shaking_fur": {
+        "n_positive": 11,
+        "n_total": 1244,
+        "accuracy": 0.9903536977491961,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "ap": 0.06300963155929397
+      },
+      "sniffing": {
+        "n_positive": 38,
+        "n_total": 1244,
+        "accuracy": 0.9686495176848875,
+        "precision": 0.47058823529411764,
+        "recall": 0.21052631578947367,
+        "f1": 0.2909090909090909,
+        "ap": 0.30761726929246475
+      },
+      "standing_head_down": {
+        "n_positive": 180,
+        "n_total": 1244,
+        "accuracy": 0.8536977491961415,
+        "precision": 0.49242424242424243,
+        "recall": 0.3611111111111111,
+        "f1": 0.4166666666666667,
+        "ap": 0.42341808597124597
+      },
+      "standing_head_up": {
+        "n_positive": 265,
+        "n_total": 1244,
+        "accuracy": 0.8842443729903537,
+        "precision": 0.7050847457627119,
+        "recall": 0.7849056603773585,
+        "f1": 0.7428571428571429,
+        "ap": 0.7657378088460528
+      },
+      "unknown": {
+        "n_positive": 75,
+        "n_total": 1244,
+        "accuracy": 0.9461414790996785,
+        "precision": 0.6428571428571429,
+        "recall": 0.24,
+        "f1": 0.34951456310679613,
+        "ap": 0.4961179715005104
+      },
+      "urinating": {
+        "n_positive": 1,
+        "n_total": 1244,
+        "accuracy": 0.9991961414790996,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "ap": 0.0015479876160990713
+      },
+      "vocalizing": {
+        "n_positive": 37,
+        "n_total": 1244,
+        "accuracy": 0.9839228295819936,
+        "precision": 0.8695652173913043,
+        "recall": 0.5405405405405406,
+        "f1": 0.6666666666666666,
+        "ap": 0.7224130015897746
+      },
+      "walking": {
+        "n_positive": 300,
+        "n_total": 1244,
+        "accuracy": 0.8617363344051447,
+        "precision": 0.7012578616352201,
+        "recall": 0.7433333333333333,
+        "f1": 0.7216828478964401,
+        "ap": 0.7810551478527886
+      }
+    }
+  }
+}
